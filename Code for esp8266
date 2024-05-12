@@ -1,0 +1,117 @@
+#include <Arduino.h>
+#include <ESP8266WiFi.h>
+#include <ESP_Mail_Client.h>
+#include <Wire.h>
+#include <Adafruit_MQ135.h>
+#include <DHT.h>
+
+#define WIFI_SSID "YOUR_WIFI_SSID"
+#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+
+#define SMTP_HOST "smtp.gmail.com"
+#define SMTP_PORT 465
+#define AUTHOR_EMAIL "YOUR_EMAIL@gmail.com"
+#define AUTHOR_PASSWORD "YOUR_EMAIL_PASSWORD"
+
+#define RECIPIENT_EMAIL "RECIPIENT_EMAIL@gmail.com"
+
+#define MQ135_PIN A0
+#define DHT_PIN D5
+#define DHT_TYPE DHT22
+
+WiFiClientSecure client;
+SMTPSession smtp(&client);
+
+Adafruit_MQ135 gasSensor(MQ135_PIN);
+DHT dht(DHT_PIN, DHT_TYPE);
+
+void smtpCallback(SMTP_Status status);
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println();
+  
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to Wi-Fi");
+  while (WiFi.status() != WL_CONNECTED){
+    Serial.print(".");
+    delay(300);
+  }
+  Serial.println();
+  Serial.print("Connected with IP: ");
+  Serial.println(WiFi.localIP());
+  Serial.println();
+
+  MailClient.networkReconnect(true);
+  smtp.debug(1);
+  smtp.callback(smtpCallback);
+
+  dht.begin();
+}
+
+void loop() {
+  float gasValue = gasSensor.readCO2();
+  float temperature = dht.readTemperature();
+  float humidity = dht.readHumidity();
+
+  Serial.print("CO2 Level (PPM): ");
+  Serial.println(gasValue);
+  Serial.print("Temperature (C): ");
+  Serial.println(temperature);
+  Serial.print("Humidity (%): ");
+  Serial.println(humidity);
+  Serial.println();
+
+  if (gasValue > 1000) { // Modify the threshold value as needed
+    sendEmailAlert(gasValue, temperature, humidity);
+    delay(60000); // Wait for a minute before sending another email to avoid spamming
+  }
+
+  delay(5000); // Adjust delay as needed
+}
+
+void sendEmailAlert(float gasValue, float temperature, float humidity) {
+  Session_Config config;
+  config.server.host_name = SMTP_HOST;
+  config.server.port = SMTP_PORT;
+  config.login.email = AUTHOR_EMAIL;
+  config.login.password = AUTHOR_PASSWORD;
+  config.login.user_domain = "";
+  config.time.ntp_server = F("pool.ntp.org,time.nist.gov");
+  config.time.gmt_offset = 3;
+  config.time.day_light_offset = 0;
+
+  SMTP_Message message;
+  message.sender.name = F("ESP");
+  message.sender.email = AUTHOR_EMAIL;
+  message.subject = F("Gas Alert");
+
+  message.addRecipient(F("Recipient"), RECIPIENT_EMAIL);
+
+  String textMsg = "Gas level exceeds threshold!\nCO2 Level: " + String(gasValue) + " PPM\nTemperature: " + String(temperature) + " C\nHumidity: " + String(humidity) + " %";
+  message.text.content = textMsg.c_str();
+  message.text.charSet = "us-ascii";
+  message.text.transfer_encoding = Content_Transfer_Encoding::enc_7bit;
+
+  message.priority = esp_mail_smtp_priority::esp_mail_smtp_priority_low;
+  message.response.notify = esp_mail_smtp_notify_success | esp_mail_smtp_notify_failure | esp_mail_smtp_notify_delay;
+
+  if (!smtp.connect(&config)) {
+    Serial.println("Connection error");
+    return;
+  }
+
+  if (!MailClient.sendMail(&smtp, &message)) {
+    Serial.println("Error sending email");
+  }
+}
+
+void smtpCallback(SMTP_Status status) {
+  Serial.println(status.info());
+
+  if (status.success()) {
+    Serial.println("Email sent successfully");
+  } else {
+    Serial.println("Email sending failed");
+  }
+}
